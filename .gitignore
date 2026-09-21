@@ -1,0 +1,47 @@
+﻿.env
+.env.*
+.netrc
+*.token
+credentials*
+secrets*
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+
+*.hdf5
+*.h5
+*.nc
+*.nc4
+*.grib
+*.grib2
+
+temp/
+tmp/
+downloads/
+cache/
+
+.vscode/
+.idea/
+
+app_backup*.py
+
+# Large raw/intermediate datasets
+data/raw/
+data/tmp_imerg_daily/
+data/tmp_imerg/
+
+# Large model artifacts
+models/*.pkl
+models/*.joblib
+rainfall_model.pkl
+
+# Large processed datasets
+data/processed/*.csv
+
+# Raw/intermediate data
+data/raw/
+data/tmp_imerg_daily/
+data/tmp_imerg/
+
+rainfall_features.pkl

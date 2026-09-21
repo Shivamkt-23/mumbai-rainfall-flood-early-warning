@@ -1,0 +1,29 @@
+{
+  "dataset": {
+    "rows": 626,
+    "features": 18,
+    "train_rows": 500,
+    "test_rows": 126,
+    "train_start": "2024-06-26 10:00:00+00:00",
+    "train_end": "2025-08-18 19:00:00+00:00",
+    "test_start": "2025-08-18 20:00:00+00:00",
+    "test_end": "2025-09-29 14:00:00+00:00"
+  },
+  "random_forest": {
+    "MAE": 0.46517881145204776,
+    "RMSE": 0.6658554626862994,
+    "R2": 0.8722796073020065,
+    "heavy_rain_MAE": 0.5475074073018565,
+    "heavy_rain_RMSE": 0.6993855316301921
+  },
+  "xgboost": {
+    "MAE": 0.89693774495806,
+    "RMSE": 1.1975552370549258,
+    "R2": 0.5868655416743753,
+    "heavy_rain_MAE": 0.7348204839109171,
+    "heavy_rain_RMSE": 0.9064709172771891
+  },
+  "heavy_rain_threshold_mm": 5.0,
+  "heavy_rain_test_samples": 11,
+  "selected_model": "Random Forest"
+}

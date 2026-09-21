@@ -1,0 +1,16 @@
+{
+    "version": "ERA5_2010_2025_BASELINE",
+    "model": "RandomForestRegressor",
+    "n_estimators": 150,
+    "max_depth": 12,
+    "rows": 105034,
+    "train_rows": 84027,
+    "test_rows": 21007,
+    "train_start": "2010-01-02 00:00:00",
+    "train_end": "2019-08-04 02:00:00",
+    "test_start": "2019-08-04 03:00:00",
+    "test_end": "2025-09-30 20:00:00",
+    "MAE": 0.1855620521718853,
+    "RMSE": 0.3961772964790433,
+    "R2": 0.8666669813003083
+}

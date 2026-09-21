@@ -1,0 +1,64 @@
+{
+  "project": "Mumbai rainfall/flood early warning prototype",
+  "dataset": {
+    "rows": 105034,
+    "columns": 41,
+    "start": "2010-01-02 00:00:00",
+    "end": "2025-09-30 20:00:00"
+  },
+  "chronological_evaluation": {
+    "train_rows": 102133,
+    "train_start": "2010-01-02 00:00:00",
+    "train_end": "2024-09-30 21:00:00",
+    "test_rows": 2901,
+    "test_start": "2025-06-02 00:00:00",
+    "test_end": "2025-09-30 20:00:00",
+    "gap_hours_between_train_and_test": 5858
+  },
+  "target": "next_hour_rain",
+  "satellite_source": {
+    "name": "NASA GPM IMERG Final Daily V07",
+    "feature_count_added": 10,
+    "leakage_policy": "Only previous completed IMERG days are used."
+  },
+  "deployment": {
+    "primary_model": "random_forest",
+    "reason": {
+      "criterion": [
+        "lower RMSE on the 2025 chronological holdout",
+        "higher R2 on the 2025 chronological holdout",
+        "lower heavy-rain MAE on the 2025 chronological holdout",
+        "lower heavy-rain RMSE on the 2025 chronological holdout"
+      ],
+      "note": "XGBoost has slightly lower overall MAE, so both models are retained; Random Forest is used as the primary deployment model because it is stronger on the other reported error measures."
+    },
+    "bundle_path": "D:\\SIH 2026\\mumbai_rainfall_flood_prototype\\models\\final_multisource_model_bundle.pkl",
+    "backup_xgb_path": "D:\\SIH 2026\\mumbai_rainfall_flood_prototype\\models\\final_multisource_xgboost.json"
+  },
+  "metrics_2025_holdout": {
+    "random_forest": {
+      "overall": {
+        "MAE_mm": 0.18723758061321016,
+        "RMSE_mm": 0.36790054325355415,
+        "R2": 0.8499104731896765
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 1.280661224439797,
+        "RMSE_mm": 1.8827093635244612
+      }
+    },
+    "xgboost": {
+      "overall": {
+        "MAE_mm": 0.1862799849867944,
+        "RMSE_mm": 0.3857204300201731,
+        "R2": 0.8350186645603543
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 1.5854113451158154,
+        "RMSE_mm": 2.342684229303682
+      }
+    }
+  }
+}

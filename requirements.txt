@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+scikit-learn
+joblib
+matplotlib
+xarray
+netCDF4
+folium
+streamlit-folium
+requests
+streamlit-autorefresh
+pydeck

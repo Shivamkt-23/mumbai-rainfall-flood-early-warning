@@ -1,0 +1,79 @@
+{
+  "dataset": {
+    "path": "D:\\SIH 2026\\mumbai_rainfall_flood_prototype\\data\\processed\\mumbai_era5_imerg_multisource_2010_2025.csv",
+    "rows": 105034,
+    "train_rows": 102133,
+    "test_rows": 2901,
+    "train_start": "2010-01-02 00:00:00",
+    "train_end": "2024-09-30 21:00:00",
+    "test_start": "2025-06-02 00:00:00",
+    "test_end": "2025-09-30 20:00:00"
+  },
+  "target": "next_hour_rain",
+  "heavy_threshold_mm": 5.0,
+  "feature_counts": {
+    "era5_only": 24,
+    "multisource": 34,
+    "added_imerg_features": 10
+  },
+  "models": {
+    "era5_random_forest": {
+      "overall": {
+        "MAE_mm": 0.18279698305609685,
+        "RMSE_mm": 0.37917596402195713,
+        "R2": 0.8405696023398423
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 1.4181557398959563,
+        "RMSE_mm": 2.2493297711903026
+      }
+    },
+    "multisource_random_forest": {
+      "overall": {
+        "MAE_mm": 0.18723758061321016,
+        "RMSE_mm": 0.36790054325355415,
+        "R2": 0.8499104731896765
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 1.2806612244397977,
+        "RMSE_mm": 1.8827093635244612
+      }
+    },
+    "era5_xgboost": {
+      "overall": {
+        "MAE_mm": 0.190856538090234,
+        "RMSE_mm": 0.4594782553090933,
+        "R2": 0.7658902739224341
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 2.4793769819567895,
+        "RMSE_mm": 3.48036392657843
+      }
+    },
+    "multisource_xgboost": {
+      "overall": {
+        "MAE_mm": 0.1862799849867944,
+        "RMSE_mm": 0.3857204300201731,
+        "R2": 0.8350186645603543
+      },
+      "heavy": {
+        "count": 22,
+        "MAE_mm": 1.5854113451158154,
+        "RMSE_mm": 2.342684229303682
+      }
+    }
+  },
+  "final_verified_evaluation": {
+    "train_start": "2010-01-02 00:00:00",
+    "train_end": "2024-09-30 21:00:00",
+    "test_start": "2025-06-02 00:00:00",
+    "test_end": "2025-09-30 20:00:00",
+    "train_rows": 102133,
+    "test_rows": 2901,
+    "gap_hours_between_train_and_test": 5858,
+    "note": "The available ERA5 record has a temporal gap; the test is the available 2025 period, not a continuous 2025-01-01 to 2025-09-30 block."
+  }
+}

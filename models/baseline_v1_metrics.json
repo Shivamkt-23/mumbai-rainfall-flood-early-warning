@@ -1,0 +1,16 @@
+{
+    "model": "RandomForestRegressor",
+    "version": "V1",
+    "n_estimators": 150,
+    "max_depth": 12,
+    "rows": 17411,
+    "train_rows": 13928,
+    "test_rows": 3483,
+    "train_start": "2020-06-02 00:00:00",
+    "train_end": "2024-09-06 15:00:00",
+    "test_start": "2024-09-06 16:00:00",
+    "test_end": "2025-09-30 20:00:00",
+    "MAE": 0.16923785038254996,
+    "RMSE": 0.3612378372675629,
+    "R2": 0.8717323722945993
+}

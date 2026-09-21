@@ -1,0 +1,38 @@
+{
+    "dataset": "mumbai_multisource_pilot_v1",
+    "rows": 51,
+    "train_rows": 40,
+    "test_rows": 11,
+    "target": "next_hour_rain",
+    "features": [
+        "era5_rainfall_mm",
+        "temperature_c",
+        "dewpoint_c",
+        "pressure_hpa",
+        "u10_ms",
+        "v10_ms",
+        "rain_3h",
+        "rain_6h",
+        "rain_24h",
+        "imerg_center_hourly_mm",
+        "imerg_mean_3x3_hourly_mm",
+        "imerg_max_3x3_hourly_mm",
+        "imerg_quality_center",
+        "imerg_quality_mean_3x3",
+        "imerg_quality_min_3x3",
+        "imerg_random_error_center",
+        "imerg_random_error_mean_3x3",
+        "imerg_random_error_max_3x3"
+    ],
+    "random_forest": {
+        "MAE": 0.8075865992793315,
+        "RMSE": 1.1785668144393222,
+        "R2": -0.6911987877344912
+    },
+    "xgboost": {
+        "MAE": 1.1277233566900697,
+        "RMSE": 1.448025126256475,
+        "R2": -1.5529272429405627
+    },
+    "status": "PILOT_ONLY \u2014 not final model evaluation"
+}

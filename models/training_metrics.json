@@ -1,0 +1,134 @@
+{
+    "dataset": {
+        "path": "data\\mumbai_era5_ml_ready_cleaned.csv",
+        "original_rows": 17561,
+        "final_rows": 17537,
+        "rows_removed": 24,
+        "feature_count": 24
+    },
+    "target": {
+        "column": "next_hour_rain",
+        "description": "Rainfall in the next hour",
+        "heavy_rain_threshold_mm": 5.0,
+        "extreme_rain_threshold_mm": 10.0
+    },
+    "split": {
+        "split_date": "2024-01-01",
+        "training_rows": 11684,
+        "testing_rows": 5853
+    },
+    "baseline": {
+        "mae_mm": 0.1776210674766229,
+        "rmse_mm": 0.37886044165652183,
+        "r2": 0.8543140887232655
+    },
+    "rainfall_regression": {
+        "model": "RandomForestRegressor",
+        "mae_mm": 0.18742812954328741,
+        "rmse_mm": 0.3743839000200873,
+        "r2": 0.8577365420848747,
+        "parameters": {
+            "bootstrap": true,
+            "ccp_alpha": 0.0,
+            "criterion": "squared_error",
+            "max_depth": 20,
+            "max_features": 1.0,
+            "max_leaf_nodes": null,
+            "max_samples": null,
+            "min_impurity_decrease": 0.0,
+            "min_samples_leaf": 2,
+            "min_samples_split": 2,
+            "min_weight_fraction_leaf": 0.0,
+            "monotonic_cst": null,
+            "n_estimators": 300,
+            "n_jobs": -1,
+            "oob_score": false,
+            "random_state": 42,
+            "verbose": 0,
+            "warm_start": false
+        }
+    },
+    "heavy_rain_classification": {
+        "model": "RandomForestClassifier",
+        "threshold_mm": 5.0,
+        "selected_probability_threshold": 0.7,
+        "precision": 0.6415094339622641,
+        "recall": 0.6666666666666666,
+        "f1": 0.6538461538461539,
+        "validation_precision": 0.375,
+        "validation_recall": 0.75,
+        "validation_f1": 0.5,
+        "training_heavy_events": 138,
+        "testing_heavy_events": 51,
+        "confusion_matrix": [
+            [
+                5783,
+                19
+            ],
+            [
+                17,
+                34
+            ]
+        ],
+        "parameters": {
+            "bootstrap": true,
+            "ccp_alpha": 0.0,
+            "class_weight": "balanced",
+            "criterion": "gini",
+            "max_depth": 20,
+            "max_features": 1.0,
+            "max_leaf_nodes": null,
+            "max_samples": null,
+            "min_impurity_decrease": 0.0,
+            "min_samples_leaf": 2,
+            "min_samples_split": 2,
+            "min_weight_fraction_leaf": 0.0,
+            "monotonic_cst": null,
+            "n_estimators": 300,
+            "n_jobs": -1,
+            "oob_score": false,
+            "random_state": 42,
+            "verbose": 0,
+            "warm_start": false
+        }
+    },
+    "feature_engineering": {
+        "lag_hours": [
+            1,
+            2,
+            3,
+            6,
+            12,
+            24
+        ],
+        "features": [
+            "rainfall_mm",
+            "temperature_c",
+            "dewpoint_c",
+            "pressure_hpa",
+            "u10_ms",
+            "v10_ms",
+            "wind_speed_ms",
+            "humidity_pct",
+            "rain_3h",
+            "rain_6h",
+            "rain_24h",
+            "rainfall_lag_1h",
+            "rainfall_lag_2h",
+            "rainfall_lag_3h",
+            "rainfall_lag_6h",
+            "rainfall_lag_12h",
+            "rainfall_lag_24h",
+            "month",
+            "hour",
+            "day_of_year",
+            "hour_sin",
+            "hour_cos",
+            "doy_sin",
+            "doy_cos"
+        ]
+    },
+    "reproducibility": {
+        "random_state": 42
+    }
+}

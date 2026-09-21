@@ -1,0 +1,44 @@
+{
+    "version": "V1",
+    "description": "Single-point ERA5 rainfall forecasting baseline",
+
+    "data": {
+        "source": "ERA5",
+        "spatial_points": 1,
+        "start": "2020-06-02",
+        "end": "2025-09-30"
+    },
+
+    "target": "next_hour_rain",
+
+    "models": {
+        "random_forest": {
+            "MAE_mm": 0.169238,
+            "RMSE_mm": 0.361238,
+            "R2": 0.871732
+        },
+
+        "persistence": {
+            "MAE_mm": 0.165649,
+            "RMSE_mm": 0.370271,
+            "R2": 0.865237
+        }
+    },
+
+    "feature_importance_top": [
+        {
+            "feature": "rainfall_mm",
+            "importance": 0.882402
+        },
+        {
+            "feature": "dewpoint_c",
+            "importance": 0.019303
+        },
+        {
+            "feature": "rainfall_lag_1h",
+            "importance": 0.009563
+        }
+    ],
+
+    "status": "FROZEN_BASELINE"
+}
