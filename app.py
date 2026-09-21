@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 
 import joblib
+import xgboost as xgb
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -506,6 +507,11 @@ FINAL_MODEL_BUNDLE_PATH = (
     / "final_multisource_model_bundle.pkl"
 )
 
+FINAL_MODEL_XGB_PATH = (
+    MODEL_DIR
+    / "final_multisource_xgboost.json"
+)
+
 FINAL_MODEL_FEATURES_PATH = (
     MODEL_DIR
     / "final_multisource_feature_columns.json"
@@ -584,11 +590,30 @@ def load_models():
 @st.cache_resource
 def load_final_multisource_model():
 
-    with open(
-        FINAL_MODEL_BUNDLE_PATH,
-        "rb",
-    ) as file:
-        bundle = joblib.load(file)
+    # The exact Random Forest bundle is intentionally kept out of GitHub
+    # because it is ~2.68 GB. For cloud deployment, use the tracked
+    # multisource XGBoost backup model for inference while retaining the
+    # frozen Random Forest metrics/predictions for evaluation.
+    if FINAL_MODEL_BUNDLE_PATH.exists():
+        with open(
+            FINAL_MODEL_BUNDLE_PATH,
+            "rb",
+        ) as file:
+            bundle = joblib.load(file)
+        model_type = "Random Forest"
+    elif FINAL_MODEL_XGB_PATH.exists():
+        cloud_model = xgb.XGBRegressor()
+        cloud_model.load_model(str(FINAL_MODEL_XGB_PATH))
+        bundle = {
+            "model": cloud_model,
+            "feature_columns": None,
+            "model_type": "XGBoost backup (cloud inference)",
+        }
+        model_type = "XGBoost backup (cloud inference)"
+    else:
+        raise FileNotFoundError(
+            "No final multisource inference model is available."
+        )
 
     with open(
         FINAL_MODEL_METADATA_PATH,
@@ -603,6 +628,14 @@ def load_final_multisource_model():
         encoding="utf-8",
     ) as file:
         feature_info = json.load(file)
+
+    if bundle.get("feature_columns") is None:
+        bundle["feature_columns"] = feature_info.get(
+            "feature_columns",
+            [],
+        )
+
+    bundle["model_type"] = model_type
 
     return (
         bundle,
@@ -1481,10 +1514,18 @@ if page == "🔴 Live Mumbai":
     satellite_source = imerg_live.attrs.get("source", "live_late")
 
     with status_col1:
+        live_model_label = final_bundle.get(
+            "model_type",
+            "Random Forest",
+        )
         if satellite_source == "historical_fallback":
-            st.warning("🧠 Final RF active • archived IMERG fallback")
+            st.warning(
+                f"🧠 {live_model_label} • archived IMERG fallback"
+            )
         else:
-            st.success("🧠 Final RF + IMERG Late live fusion active")
+            st.success(
+                f"🧠 {live_model_label} + IMERG Late live fusion active"
+            )
 
     with status_col2:
         if satellite_source == "historical_fallback":
@@ -4363,7 +4404,6 @@ elif page == "🧠 Final Multisource Model":
     )
 
     required_artifacts = [
-        FINAL_MODEL_BUNDLE_PATH,
         FINAL_MODEL_FEATURES_PATH,
         FINAL_MODEL_METADATA_PATH,
         FINAL_MODEL_TRAINING_METRICS_PATH,
@@ -4371,6 +4411,14 @@ elif page == "🧠 Final Multisource Model":
         FINAL_MODEL_IMPORTANCE_PATH,
         FINAL_MULTISOURCE_DATA_PATH,
     ]
+
+    inference_artifact_available = (
+        FINAL_MODEL_BUNDLE_PATH.exists()
+        or FINAL_MODEL_XGB_PATH.exists()
+    )
+
+    if not inference_artifact_available:
+        required_artifacts.append(FINAL_MODEL_XGB_PATH)
 
     missing_artifacts = [
         str(path)
@@ -4416,9 +4464,20 @@ elif page == "🧠 Final Multisource Model":
         st.exception(error)
         st.stop()
 
-    st.success(
-        "Final multisource Random Forest model loaded successfully."
+    deployed_model_type = final_bundle.get(
+        "model_type",
+        "Random Forest",
     )
+    if deployed_model_type.startswith("XGBoost"):
+        st.info(
+            "Frozen Random Forest evaluation is shown below. "
+            "Cloud inference uses the tracked multisource XGBoost backup model "
+            "because the exact Random Forest bundle is too large for GitHub."
+        )
+    else:
+        st.success(
+            "Final multisource Random Forest model loaded successfully."
+        )
 
     model_metrics = (
         final_metadata
@@ -4565,6 +4624,13 @@ ERA5 hourly weather
         "This page demonstrates the historical multisource model; "
         "it is not a claim of real-time satellite nowcasting."
     )
+
+    if deployed_model_type.startswith("XGBoost"):
+        st.caption(
+            "Deployment note: the frozen Random Forest remains the reference model for "
+            "the reported holdout metrics; this cloud build uses the smaller XGBoost "
+            "backup artifact for interactive inference."
+        )
 
     # --------------------------------------------------------
     # Feature list
