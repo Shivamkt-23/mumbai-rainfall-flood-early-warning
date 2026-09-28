@@ -1,47 +1,52 @@
-﻿.env
-.env.*
-.netrc
-*.token
-credentials*
-secrets*
-.streamlit/secrets.toml
-
+# Keep the repository focused on the Streamlit deployment.
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+.env
 
-*.hdf5
-*.h5
-*.nc
-*.nc4
-*.grib
-*.grib2
+# Do not upload the original multi-GB V2 RFs. The deployment uses verified shards.
+models/*
+!models/rainfall_model.pkl
+!models/heavy_rain_classifier.pkl
+!models/rainfall_features.pkl
+!models/training_metrics.json
+!models/v2_calibration.json
+!models/v2_calibrated_metrics.json
+!models/final_multisource_xgboost.json
+!models/final_multisource_feature_columns.json
+!models/final_model_metadata.json
+!models/final_training_metrics.json
+!models/final_multisource_test_predictions.csv
+!models/final_multisource_feature_importance.csv
 
-temp/
-tmp/
-downloads/
-cache/
+# Explicitly exclude the original huge model bundles even if patterns change later.
+models/v2_two_stage_base_model_2010_2024.pkl
+models/v2_two_stage_fusion_rf.pkl
+models/final_multisource_model_bundle.pkl
+models/final_multisource_random_forest.pkl
+models/v2_two_stage_evaluation_bundle.pkl
+models/v2_fused_model_bundle.pkl
+models/v2_fused_random_forest.pkl
 
-.vscode/
-.idea/
+# Data: keep only the runtime datasets required by the app.
+data/*
+!data/mumbai_era5_ml_ready_cleaned.csv
+!data/processed/
+data/processed/*
+!data/processed/imerg_2010_2025_daily.csv
 
-app_backup*.py
+# Caches/temp files are not deployment inputs.
+data/tmp_imerg_live/
+data/processed/imerg_live_late_cache.csv
 
-# Large raw/intermediate datasets
-data/raw/
-data/tmp_imerg_daily/
-data/tmp_imerg/
+# Optional DEM. The app handles its absence gracefully.
+data/dem/
 
-# Large model artifacts
-models/*.pkl
-models/*.joblib
-rainfall_model.pkl
-
-# Large processed datasets
-data/processed/*.csv
-
-# Raw/intermediate data
-data/raw/
-data/tmp_imerg_daily/
-data/tmp_imerg/
-
-rainfall_features.pkl
+# Exact V2 verified shards used by the deployment.
+!v2_shards/
+!v2_shards/base/
+!v2_shards/base/*
+!v2_shards/fusion/
+!v2_shards/fusion/*

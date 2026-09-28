@@ -1,0 +1,14 @@
+{
+  "model_version": "V2 calibrated",
+  "base_model": "v2_two_stage_base_model_2010_2024.pkl",
+  "fusion_model": "v2_two_stage_fusion_rf.pkl",
+  "fusion_type": "RandomForestRegressor residual correction",
+  "correction_formula": "base_prediction + alpha * residual_correction",
+  "nwp_correction_alpha": 0.5,
+  "alpha_selection_method": "walk-forward validation",
+  "alpha_selection_metric": "RMSE",
+  "validation_best_alpha": 0.5,
+  "target": "next_hour_rain",
+  "heavy_rain_threshold_mm": 5.0,
+  "note": "Calibration selected using pre-2025 walk-forward validation. The 2025 period remains an untouched holdout."
+}

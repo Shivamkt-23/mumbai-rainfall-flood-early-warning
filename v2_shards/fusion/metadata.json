@@ -1,0 +1,21 @@
+{
+  "model_name": "v2_fusion_rf",
+  "n_estimators": 600,
+  "n_features": 12,
+  "feature_names": [
+    "base_prediction",
+    "nwp_temperature_1h",
+    "nwp_humidity_1h",
+    "nwp_dewpoint_1h",
+    "nwp_pressure_1h",
+    "nwp_precipitation_1h",
+    "nwp_wind_speed_1h",
+    "nwp_wind_u_1h",
+    "nwp_wind_v_1h",
+    "nwp_precip_next_3h",
+    "nwp_precip_next_6h",
+    "nwp_precip_next_24h"
+  ],
+  "shard_size": 50,
+  "estimator_type": "RandomForestRegressor"
+}
