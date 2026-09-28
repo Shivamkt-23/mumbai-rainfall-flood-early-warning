@@ -1,15 +1,18 @@
 from pathlib import Path
+import gc
 import json
 import joblib
 import numpy as np
 
 
 class ShardedRandomForestRegressor:
-    """Tree-preserving RandomForest wrapper that loads shards once per process.
+    """Exact tree-preserving RF wrapper with bounded peak memory.
 
-    The shard contents are unchanged. The only optimization is keeping the
-    already-loaded DecisionTree estimators in memory so repeated predictions
-    do not re-read ~900 MB of shard files from disk for every location.
+    Each prediction streams one 50-tree shard at a time, accumulates the
+    predictions from those trees, and releases the shard before loading the
+    next one. The model trees and averaging rule are unchanged; only the
+    storage/loading strategy changes so Community Cloud does not need to keep
+    the full ~938 MB serialized forest set resident at once.
     """
 
     def __init__(self, shard_dir):
@@ -28,25 +31,6 @@ class ShardedRandomForestRegressor:
         if not self.shard_files:
             raise FileNotFoundError(f"No RF shards found in {self.shard_dir}")
 
-        self._estimators = None
-
-    def _ensure_loaded(self):
-        if self._estimators is not None:
-            return
-
-        estimators = []
-        for shard_file in self.shard_files:
-            shard = joblib.load(shard_file)
-            estimators.extend(shard["estimators"])
-            del shard
-
-        if len(estimators) != self.n_estimators:
-            raise ValueError(
-                f"Expected {self.n_estimators} trees, found {len(estimators)}"
-            )
-
-        self._estimators = estimators
-
     def predict(self, X):
         if hasattr(X, "loc"):
             missing = [
@@ -60,15 +44,30 @@ class ShardedRandomForestRegressor:
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(1, -1)
-        if X.shape[1] != self.n_features_in_:
+        if X.ndim != 2 or X.shape[1] != self.n_features_in_:
             raise ValueError(
-                f"Expected {self.n_features_in_} features, got {X.shape[1]}"
+                f"Expected {self.n_features_in_} features, got "
+                f"{X.shape[1] if X.ndim == 2 else 'invalid input'}"
             )
 
-        self._ensure_loaded()
-
         total = np.zeros(X.shape[0], dtype=np.float64)
-        for tree in self._estimators:
-            total += tree.predict(X)
+        tree_count = 0
 
-        return total / len(self._estimators)
+        # Stream one shard at a time so peak RAM is bounded by one shard.
+        for shard_file in self.shard_files:
+            shard = joblib.load(shard_file)
+            estimators = shard["estimators"]
+            for tree in estimators:
+                total += tree.predict(X)
+                tree_count += 1
+
+            del estimators
+            del shard
+            gc.collect()
+
+        if tree_count != self.n_estimators:
+            raise ValueError(
+                f"Expected {self.n_estimators} trees, found {tree_count}"
+            )
+
+        return total / tree_count

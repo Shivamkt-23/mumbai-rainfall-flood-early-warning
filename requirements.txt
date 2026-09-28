@@ -4,7 +4,7 @@ numpy
 requests
 joblib
 xgboost
-scikit-learn==1.9.0
+scikit-learn==1.9.1
 pydeck
 Pillow
 streamlit-autorefresh
