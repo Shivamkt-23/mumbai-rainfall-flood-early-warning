@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 
 
 import math
+import time
 
 import requests
 
@@ -41,6 +42,113 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 REQUEST_TIMEOUT = 20
+
+WEATHER_CACHE_TTL = 10 * 60
+
+_WEATHER_CACHE = {}
+
+
+def _open_meteo_get(params):
+    """Cached Open-Meteo GET with controlled 429/network retries."""
+
+    def freeze(value):
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    cache_key = tuple(
+        sorted(
+            (key, freeze(value))
+            for key, value in params.items()
+        )
+    )
+
+    now = time.monotonic()
+    cached = _WEATHER_CACHE.get(cache_key)
+
+    if cached is not None:
+        cached_time, cached_data = cached
+        if now - cached_time < WEATHER_CACHE_TTL:
+            return cached_data
+
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            response = SESSION.get(
+                OPEN_METEO_URL,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+
+                try:
+                    wait_seconds = float(retry_after)
+                except (TypeError, ValueError):
+                    wait_seconds = 2.0 * (attempt + 1)
+
+                wait_seconds = min(
+                    max(wait_seconds, 1.0),
+                    10.0,
+                )
+
+                last_error = RuntimeError(
+                    f"Open-Meteo rate limit (HTTP 429). "
+                    f"Retrying in {wait_seconds:.1f}s."
+                )
+
+                if attempt < 2:
+                    time.sleep(wait_seconds)
+                    continue
+
+                raise last_error
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if isinstance(data, dict):
+                if "hourly" not in data:
+                    raise RuntimeError(
+                        "Open-Meteo response does not contain hourly data."
+                    )
+            elif isinstance(data, list):
+                if not data or any(
+                    not isinstance(item, dict) or "hourly" not in item
+                    for item in data
+                ):
+                    raise RuntimeError(
+                        "Open-Meteo batched response does not contain valid hourly data."
+                    )
+            else:
+                raise RuntimeError(
+                    "Open-Meteo returned an unexpected response format."
+                )
+
+            _WEATHER_CACHE[cache_key] = (
+                time.monotonic(),
+                data,
+            )
+
+            return data
+
+        except requests.RequestException as exc:
+            last_error = exc
+
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+
+            raise RuntimeError(
+                f"Open-Meteo request failed: {exc}"
+            ) from exc
+
+    raise RuntimeError(
+        f"Open-Meteo request failed: {last_error}"
+    )
+
 
 
 
@@ -413,99 +521,29 @@ def _calculate_uv_components(
 
 
 def fetch_location_weather(
-
     latitude: float,
-
     longitude: float,
-
 ) -> Dict[str, Any]:
-
-    """
-
-    Fetch approximately two days of hourly weather data
-
-    for one Mumbai location.
-
-    """
-
-
+    """Fetch approximately two days of hourly weather data."""
 
     params = {
-
         "latitude": latitude,
-
         "longitude": longitude,
-
         "hourly": (
-
             "temperature_2m,"
-
             "relative_humidity_2m,"
-
             "dew_point_2m,"
-
             "surface_pressure,"
-
             "precipitation,"
-
             "wind_speed_10m,"
-
             "wind_direction_10m"
-
         ),
-
         "past_days": 2,
-
         "forecast_days": 1,
-
         "timezone": "Asia/Kolkata",
-
     }
 
-
-
-    response = SESSION.get(
-
-        OPEN_METEO_URL,
-
-        params=params,
-
-        timeout=REQUEST_TIMEOUT,
-
-    )
-
-
-
-    response.raise_for_status()
-
-
-
-    data = response.json()
-
-
-
-    if "hourly" not in data:
-
-        raise RuntimeError(
-
-            "Open-Meteo response does not contain hourly data."
-
-        )
-
-
-
-    return data
-
-
-
-
-
-# ============================================================
-
-# CONVERT API RESPONSE TO HOURLY DATAFRAME
-
-# ============================================================
-
+    return _open_meteo_get(params)
 
 
 def _hourly_dataframe_from_response(
@@ -1592,33 +1630,56 @@ def _extract_location_values(
 
 
 def fetch_all_locations_with_history() -> List[Dict[str, Any]]:
-    """Fetch live weather and engineered hourly history for multisource inference."""
+    """
+    Fetch all Mumbai monitoring locations in ONE Open-Meteo request.
+    """
 
-    results: List[Dict[str, Any]] = []
+    if not MUMBAI_LOCATIONS:
+        return []
 
-    for location in MUMBAI_LOCATIONS:
-        try:
-            weather_data = fetch_location_weather(
-                latitude=location["latitude"],
-                longitude=location["longitude"],
+    latitudes = ",".join(
+        str(location["latitude"])
+        for location in MUMBAI_LOCATIONS
+    )
+
+    longitudes = ",".join(
+        str(location["longitude"])
+        for location in MUMBAI_LOCATIONS
+    )
+
+    params = {
+        "latitude": latitudes,
+        "longitude": longitudes,
+        "hourly": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "dew_point_2m,"
+            "surface_pressure,"
+            "precipitation,"
+            "wind_speed_10m,"
+            "wind_direction_10m"
+        ),
+        "past_days": 2,
+        "forecast_days": 1,
+        "timezone": "Asia/Kolkata",
+    }
+
+    try:
+        payload = _open_meteo_get(params)
+
+        if isinstance(payload, list):
+            payloads = payload
+        else:
+            payloads = [payload]
+
+        if len(payloads) != len(MUMBAI_LOCATIONS):
+            raise RuntimeError(
+                "Open-Meteo returned an unexpected number of locations."
             )
 
-            hourly = _hourly_dataframe_from_response(weather_data)
-            hourly = _build_rainfall_features(hourly)
-            hourly = _build_time_features(hourly)
-            hourly = hourly.sort_values("datetime").reset_index(drop=True)
-
-            values = _extract_location_values(weather_data)
-
-            results.append({
-                **location,
-                **values,
-                "hourly": hourly,
-                "api_status": "connected",
-            })
-
-        except Exception as exc:
-            results.append({
+    except Exception as exc:
+        return [
+            {
                 **location,
                 "datetime": None,
                 "temperature_c": 0.0,
@@ -1649,7 +1710,75 @@ def fetch_all_locations_with_history() -> List[Dict[str, Any]]:
                 "doy_cos": 0.0,
                 "hourly": None,
                 "api_status": f"error: {exc}",
-            })
+            }
+            for location in MUMBAI_LOCATIONS
+        ]
+
+    results = []
+
+    for location, weather_data in zip(
+        MUMBAI_LOCATIONS,
+        payloads,
+    ):
+        try:
+            hourly = _hourly_dataframe_from_response(
+                weather_data
+            )
+
+            hourly = _build_rainfall_features(hourly)
+            hourly = _build_time_features(hourly)
+            hourly = hourly.sort_values(
+                "datetime"
+            ).reset_index(drop=True)
+
+            values = _extract_location_values(
+                weather_data
+            )
+
+            results.append(
+                {
+                    **location,
+                    **values,
+                    "hourly": hourly,
+                    "api_status": "connected",
+                }
+            )
+
+        except Exception as exc:
+            results.append(
+                {
+                    **location,
+                    "datetime": None,
+                    "temperature_c": 0.0,
+                    "humidity_pct": 0.0,
+                    "dewpoint_c": 0.0,
+                    "pressure_hpa": 0.0,
+                    "rainfall_mm": 0.0,
+                    "wind_speed_ms": 0.0,
+                    "u10_ms": 0.0,
+                    "v10_ms": 0.0,
+                    "rain_3h": 0.0,
+                    "rain_6h": 0.0,
+                    "rain_24h": 0.0,
+                    "rainfall_lag_1h": 0.0,
+                    "rainfall_lag_2h": 0.0,
+                    "rainfall_lag_3h": 0.0,
+                    "rainfall_lag_6h": 0.0,
+                    "rainfall_lag_12h": 0.0,
+                    "rainfall_lag_24h": 0.0,
+                    "year": 0,
+                    "month": 0,
+                    "day": 0,
+                    "hour": 0,
+                    "day_of_year": 0,
+                    "hour_sin": 0.0,
+                    "hour_cos": 0.0,
+                    "doy_sin": 0.0,
+                    "doy_cos": 0.0,
+                    "hourly": None,
+                    "api_status": f"error: {exc}",
+                }
+            )
 
     return results
 

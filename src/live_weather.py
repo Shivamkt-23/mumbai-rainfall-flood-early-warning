@@ -4,6 +4,7 @@
 # ============================================================
 
 from datetime import datetime
+import time
 from typing import Dict
 
 import numpy as np
@@ -21,6 +22,12 @@ MUMBAI_LONGITUDE = 72.8777
 OPEN_METEO_URL = (
     "https://api.open-meteo.com/v1/forecast"
 )
+
+
+LIVE_WEATHER_CACHE_TTL = 10 * 60
+
+_LIVE_WEATHER_CACHE = None
+_LIVE_WEATHER_CACHE_TIME = 0.0
 
 
 # ============================================================
@@ -93,15 +100,74 @@ def fetch_live_mumbai_weather() -> Dict:
     # API REQUEST
     # --------------------------------------------------------
 
-    response = requests.get(
-        OPEN_METEO_URL,
-        params=params,
-        timeout=15,
-    )
+    global _LIVE_WEATHER_CACHE
+    global _LIVE_WEATHER_CACHE_TIME
 
-    response.raise_for_status()
+    now = time.monotonic()
 
-    payload = response.json()
+    if (
+        _LIVE_WEATHER_CACHE is not None
+        and now - _LIVE_WEATHER_CACHE_TIME
+        < LIVE_WEATHER_CACHE_TTL
+    ):
+        payload = _LIVE_WEATHER_CACHE
+
+    else:
+        last_error = None
+
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    OPEN_METEO_URL,
+                    params=params,
+                    timeout=15,
+                )
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get(
+                        "Retry-After"
+                    )
+
+                    try:
+                        wait_seconds = float(retry_after)
+                    except (TypeError, ValueError):
+                        wait_seconds = 2.0 * (attempt + 1)
+
+                    wait_seconds = min(
+                        max(wait_seconds, 1.0),
+                        10.0,
+                    )
+
+                    last_error = RuntimeError(
+                        f"Open-Meteo rate limit (HTTP 429). "
+                        f"Retrying in {wait_seconds:.1f}s."
+                    )
+
+                    if attempt < 2:
+                        time.sleep(wait_seconds)
+                        continue
+
+                    raise last_error
+
+                response.raise_for_status()
+
+                payload = response.json()
+
+                _LIVE_WEATHER_CACHE = payload
+                _LIVE_WEATHER_CACHE_TIME = time.monotonic()
+
+                break
+
+            except requests.RequestException as exc:
+                last_error = exc
+
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+
+                raise RuntimeError(
+                    f"Open-Meteo request failed: {exc}"
+                ) from exc
 
 
     if "hourly" not in payload:
