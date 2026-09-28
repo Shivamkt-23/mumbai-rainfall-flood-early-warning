@@ -7,8 +7,6 @@ from pathlib import Path
 import json
 import base64
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
-
 
 import requests
 
@@ -931,33 +929,78 @@ def load_calibrated_v2_model():
     )
 
 
+@st.cache_data(ttl=10 * 60, show_spinner=False)
+def predict_v2_batch(stage, inputs):
+    """Predict a V2 stage in one batch and cache the result for reruns.
+
+    The sharded RF loads each shard during predict(); batching all spatial
+    locations means each model's shards are loaded once instead of once per
+    location. The cache also avoids repeating the inference when Streamlit
+    reruns because of page/navigation interactions.
+    """
+    if stage not in {"base", "fusion"}:
+        raise ValueError(f"Unknown V2 prediction stage: {stage}")
+
+    (
+        base_model,
+        fusion_model,
+        _,
+        _,
+        _,
+        _,
+    ) = load_calibrated_v2_model()
+
+    model = base_model if stage == "base" else fusion_model
+    values = model.predict(inputs)
+    return np.asarray(values, dtype=float)
+
+
 @st.cache_resource
 def load_final_multisource_model():
 
-    # The exact Random Forest bundle is intentionally kept out of GitHub
-    # because it is ~2.68 GB. For cloud deployment, use the tracked
-    # multisource XGBoost backup model for inference while retaining the
-    # frozen Random Forest metrics/predictions for evaluation.
+    # Prefer the exact Random Forest bundle when it can be loaded.
+    # Some local copies can become unreadable/incompatible even though the
+    # file exists; in that case fail over to the tracked XGBoost backup so
+    # historical/evaluation pages remain usable instead of crashing with a
+    # low-level pickle KeyError.
+    rf_load_error = None
+
     if FINAL_MODEL_BUNDLE_PATH.exists():
-        with open(
-            FINAL_MODEL_BUNDLE_PATH,
-            "rb",
-        ) as file:
-            bundle = joblib.load(file)
-        model_type = "Random Forest"
-    elif FINAL_MODEL_XGB_PATH.exists():
+        try:
+            with open(
+                FINAL_MODEL_BUNDLE_PATH,
+                "rb",
+            ) as file:
+                bundle = joblib.load(file)
+            model_type = "Random Forest"
+        except Exception as error:
+            rf_load_error = error
+            bundle = None
+            model_type = None
+    else:
+        bundle = None
+        model_type = None
+
+    if bundle is None:
+        if not FINAL_MODEL_XGB_PATH.exists():
+            if rf_load_error is not None:
+                raise RuntimeError(
+                    "The local final Random Forest artifact could not be loaded "
+                    f"({type(rf_load_error).__name__}), and the tracked XGBoost "
+                    "backup model is also missing."
+                ) from rf_load_error
+            raise FileNotFoundError(
+                "No final multisource inference model is available."
+            )
+
         cloud_model = xgb.XGBRegressor()
         cloud_model.load_model(str(FINAL_MODEL_XGB_PATH))
         bundle = {
             "model": cloud_model,
             "feature_columns": None,
-            "model_type": "XGBoost backup (cloud inference)",
+            "model_type": "XGBoost backup (cloud/local fallback)",
         }
-        model_type = "XGBoost backup (cloud inference)"
-    else:
-        raise FileNotFoundError(
-            "No final multisource inference model is available."
-        )
+        model_type = "XGBoost backup (cloud/local fallback)"
 
     with open(
         FINAL_MODEL_METADATA_PATH,
@@ -1444,29 +1487,131 @@ def risk_alert(level):
 # FINAL MULTISOURCE TEST PREDICTIONS
 # ============================================================
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def load_final_test_predictions():
 
-    data = pd.read_csv(
-        FINAL_MODEL_PREDICTIONS_PATH,
-        parse_dates=["datetime"],
-    )
+    # Use the frozen prediction artifact when it is available.
+    if FINAL_MODEL_PREDICTIONS_PATH.exists():
+        data = pd.read_csv(
+            FINAL_MODEL_PREDICTIONS_PATH,
+            parse_dates=["datetime"],
+        )
 
-    required = [
-        "datetime",
-        "actual_next_hour_rain",
-        "rf_multisource_prediction",
-    ]
+        required = [
+            "datetime",
+            "actual_next_hour_rain",
+            "rf_multisource_prediction",
+        ]
 
-    missing = [
-        column
-        for column in required
-        if column not in data.columns
-    ]
+        missing = [
+            column
+            for column in required
+            if column not in data.columns
+        ]
 
-    if missing:
-        raise ValueError(
-            f"Final prediction file is missing columns: {missing}"
+        if missing:
+            raise ValueError(
+                f"Final prediction file is missing columns: {missing}"
+            )
+
+    else:
+        # Presentation-safe fallback: rebuild the same 2025 holdout prediction
+        # table from the tracked final inference artifact. This keeps the
+        # Heavy-Rain Events page functional when the large CSV artifact was not
+        # copied into a deployment bundle. The exact RF bundle is preferred
+        # locally; the tracked XGBoost backup is used automatically on cloud.
+        if not FINAL_MULTISOURCE_DATA_PATH.exists():
+            raise FileNotFoundError(
+                "Final multisource test predictions are unavailable and the "
+                "historical multisource dataset is also missing."
+            )
+
+        final_bundle, final_metadata, final_feature_info = (
+            load_final_multisource_model()
+        )
+
+        data_source = load_final_multisource_dataset()
+        chronology = final_metadata.get(
+            "chronological_evaluation",
+            {},
+        )
+        test_start = pd.Timestamp(
+            chronology.get("test_start", "2025-01-01")
+        )
+        test_end = pd.Timestamp(
+            chronology.get("test_end", "2025-09-30 23:59:59")
+        )
+
+        test = data_source[
+            (data_source["datetime"] >= test_start)
+            & (data_source["datetime"] <= test_end)
+        ].copy()
+
+        feature_columns = list(
+            final_bundle.get("feature_columns")
+            or final_feature_info.get("feature_columns", [])
+        )
+
+        if not feature_columns:
+            raise ValueError(
+                "Final multisource feature columns are unavailable; cannot "
+                "rebuild the 2025 holdout prediction table."
+            )
+
+        missing_features = [
+            column
+            for column in feature_columns
+            if column not in test.columns
+        ]
+
+        if missing_features:
+            raise ValueError(
+                "Final multisource dataset is missing model features: "
+                + ", ".join(missing_features)
+            )
+
+        X_test = test[feature_columns].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+
+        if X_test.isna().any().any():
+            missing_counts = {
+                column: int(X_test[column].isna().sum())
+                for column in feature_columns
+                if X_test[column].isna().any()
+            }
+            raise ValueError(
+                f"Final holdout features contain missing/non-numeric values: "
+                f"{missing_counts}"
+            )
+
+        if "next_hour_rain" not in test.columns:
+            raise ValueError(
+                "Final multisource dataset does not contain the target "
+                "column 'next_hour_rain'."
+            )
+
+        model = final_bundle["model"]
+        prediction = np.maximum(
+            np.asarray(model.predict(X_test), dtype=float),
+            0.0,
+        )
+
+        data = pd.DataFrame(
+            {
+                "datetime": test["datetime"].to_numpy(),
+                "actual_next_hour_rain": pd.to_numeric(
+                    test["next_hour_rain"],
+                    errors="coerce",
+                ).to_numpy(),
+                "rf_multisource_prediction": prediction,
+            }
+        )
+
+        data.attrs["prediction_source"] = final_bundle.get(
+            "model_type",
+            "deployed final model",
         )
 
     data = data.sort_values("datetime").reset_index(drop=True)
@@ -1494,9 +1639,9 @@ def load_final_test_predictions():
         data["next_hour_rain"] >= HEAVY_RAIN_THRESHOLD
     ).astype(int)
 
-    # The frozen final model is a regression model, not the old
-    # probability classifier. Heavy-rain detection is therefore
-    # derived from the predicted rainfall crossing the 5 mm threshold.
+    # The final multisource model is a regression model, not the old
+    # probability classifier. Heavy-rain detection is therefore derived from
+    # the predicted rainfall crossing the configured threshold.
     data["predicted_heavy"] = (
         data["predicted_rain_mm"] >= HEAVY_RAIN_THRESHOLD
     ).astype(int)
@@ -1844,13 +1989,11 @@ st.html(
 # LOCATION-SPECIFIC ECMWF NWP FOR V2 SPATIAL INFERENCE
 # ============================================================
 
-@st.cache_data(ttl=10 * 60, show_spinner=False)
-def fetch_location_nwp_forecast(
-    latitude,
-    longitude,
+def _prepare_location_nwp_forecast(
+    payload,
     forecast_hours=48,
 ):
-    """Fetch location-specific ECMWF HRES input features for V2 fusion."""
+    """Normalize one ECMWF API response into the exact V2 NWP schema."""
 
     if forecast_hours < 24:
         forecast_hours = 24
@@ -1858,33 +2001,6 @@ def fetch_location_nwp_forecast(
     if forecast_hours > 72:
         forecast_hours = 72
 
-    params = {
-        "latitude": float(latitude),
-        "longitude": float(longitude),
-        "hourly": (
-            "temperature_2m,"
-            "relative_humidity_2m,"
-            "dew_point_2m,"
-            "surface_pressure,"
-            "precipitation,"
-            "wind_speed_10m,"
-            "wind_direction_10m"
-        ),
-        "forecast_days": 3,
-        "timezone": "Asia/Kolkata",
-        "wind_speed_unit": "ms",
-        "temperature_unit": "celsius",
-        "precipitation_unit": "mm",
-    }
-
-    response = requests.get(
-        "https://api.open-meteo.com/v1/ecmwf",
-        params=params,
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    payload = response.json()
     hourly = payload.get("hourly")
 
     if not hourly:
@@ -1959,6 +2075,128 @@ def fetch_location_nwp_forecast(
     forecast["forecast_next_24h_mm"] = next_24h
 
     return forecast.reset_index(drop=True)
+
+
+@st.cache_data(ttl=10 * 60, show_spinner=False)
+def fetch_location_nwp_forecast(
+    latitude,
+    longitude,
+    forecast_hours=48,
+):
+    """Fetch location-specific ECMWF HRES input features for V2 fusion."""
+
+    if forecast_hours < 24:
+        forecast_hours = 24
+
+    if forecast_hours > 72:
+        forecast_hours = 72
+
+    params = {
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "hourly": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "dew_point_2m,"
+            "surface_pressure,"
+            "precipitation,"
+            "wind_speed_10m,"
+            "wind_direction_10m"
+        ),
+        "forecast_days": 3,
+        "timezone": "Asia/Kolkata",
+        "wind_speed_unit": "ms",
+        "temperature_unit": "celsius",
+        "precipitation_unit": "mm",
+    }
+
+    response = requests.get(
+        "https://api.open-meteo.com/v1/ecmwf",
+        params=params,
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+
+    return _prepare_location_nwp_forecast(
+        response.json(),
+        forecast_hours=forecast_hours,
+    )
+
+
+@st.cache_data(ttl=10 * 60, show_spinner=False)
+def fetch_spatial_nwp_forecasts(
+    location_specs,
+    forecast_hours=48,
+):
+    """Fetch all Mumbai ECMWF forecasts in one API request.
+
+    Open-Meteo supports comma-separated latitude/longitude coordinates and
+    returns one JSON structure per requested location. This avoids the
+    nine-request/thread-pool pattern that made the Risk Map fragile.
+    """
+
+    if not location_specs:
+        return {}
+
+    latitudes = ",".join(
+        f"{float(spec[1]):.6f}"
+        for spec in location_specs
+    )
+    longitudes = ",".join(
+        f"{float(spec[2]):.6f}"
+        for spec in location_specs
+    )
+
+    params = {
+        "latitude": latitudes,
+        "longitude": longitudes,
+        "hourly": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "dew_point_2m,"
+            "surface_pressure,"
+            "precipitation,"
+            "wind_speed_10m,"
+            "wind_direction_10m"
+        ),
+        "forecast_days": 3,
+        "timezone": "Asia/Kolkata",
+        "wind_speed_unit": "ms",
+        "temperature_unit": "celsius",
+        "precipitation_unit": "mm",
+    }
+
+    try:
+        response = requests.get(
+            "https://api.open-meteo.com/v1/ecmwf",
+            params=params,
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return {}
+
+    payloads = payload if isinstance(payload, list) else [payload]
+
+    if len(payloads) != len(location_specs):
+        return {}
+
+    results = {}
+
+    for spec, location_payload in zip(
+        location_specs,
+        payloads,
+    ):
+        try:
+            results[spec[0]] = _prepare_location_nwp_forecast(
+                location_payload,
+                forecast_hours=forecast_hours,
+            )
+        except Exception:
+            continue
+
+    return results
 
 
 # ============================================================
@@ -3433,69 +3671,61 @@ elif page == "🗺️ Mumbai Risk Map":
     processed_records = []
     errors = []
 
-    # Fetch the location-specific ECMWF forecasts concurrently.
-    # This preserves the exact per-location NWP inputs and model pipeline,
-    # but avoids waiting up to 30 seconds for each location serially.
+    # Fetch every location's ECMWF forecast in one request.
+    # Open-Meteo supports comma-separated coordinates and returns one
+    # response object per location. This removes the nine-request pattern.
     nwp_records = []
     for record in spatial_records:
         location_name = record.get("name", "Unknown")
         hourly = record.get("hourly")
         if hourly is None or hourly.empty:
             continue
+
         imerg_live = imerg_live_contexts.get(location_name)
         if imerg_live is None or imerg_live.empty:
             continue
+
         nwp_records.append(record)
 
-    def _fetch_nwp_safe(record):
-        location_name = record.get("name", "Unknown")
-        try:
-            result = fetch_location_nwp_forecast(
-                latitude=float(record["latitude"]),
-                longitude=float(record["longitude"]),
-                forecast_hours=48,
-            )
-            return location_name, result, None
-        except Exception as error:
-            return location_name, None, str(error)
+    nwp_location_specs = tuple(
+        (
+            record.get("name", "Unknown"),
+            float(record["latitude"]),
+            float(record["longitude"]),
+        )
+        for record in nwp_records
+    )
 
-    nwp_results = {}
-    if nwp_records:
-        with st.status(
-            f"Fetching ECMWF forecasts for {len(nwp_records)} Mumbai locations...",
-            expanded=False,
-        ) as nwp_status:
-            with ThreadPoolExecutor(max_workers=min(4, len(nwp_records))) as executor:
-                for location_name, result, error_message in executor.map(
-                    _fetch_nwp_safe,
-                    nwp_records,
-                ):
-                    nwp_results[location_name] = (result, error_message)
-            nwp_status.update(
-                label="ECMWF forecasts ready",
-                state="complete",
-            )
+    nwp_results = fetch_spatial_nwp_forecasts(
+        nwp_location_specs,
+        forecast_hours=48,
+    )
+    nwp_fallback_locations = []
+
+    # ------------------------------------------------------------
+    # 1) Build all live base-model rows first.
+    #    The sharded base RF is then predicted ONCE for all locations.
+    # ------------------------------------------------------------
+    batch_items = []
+    base_inputs = []
 
     for record in spatial_records:
         location_name = record.get("name", "Unknown")
         hourly = record.get("hourly")
+
         if hourly is None or hourly.empty:
             errors.append(f"{location_name}: no hourly history returned")
             continue
 
-        imerg_live = imerg_live_contexts.get(
-            location_name
-        )
+        imerg_live = imerg_live_contexts.get(location_name)
 
-        if (
-            imerg_live is None
-            or imerg_live.empty
-        ):
+        if imerg_live is None or imerg_live.empty:
             errors.append(
                 f"{location_name}: no location-specific "
                 "IMERG context returned"
             )
             continue
+
         try:
             X_live, latest_live = build_live_multisource_features(
                 hourly_live=hourly,
@@ -3503,102 +3733,206 @@ elif page == "🗺️ Mumbai Risk Map":
                 feature_columns=v2_base_features,
             )
 
-            base_prediction = max(
-                0.0,
-                float(
-                    v2_base_model.predict(
-                        X_live
-                    )[0]
-                ),
-            )
-
-            location_nwp, nwp_error = nwp_results.get(
-                location_name,
-                (None, "ECMWF forecast was not fetched for this location."),
-            )
-            if location_nwp is None:
-                raise RuntimeError(
-                    f"ECMWF forecast unavailable: {nwp_error}"
-                )
-
-            nwp_features = build_live_v2_nwp_features(
-                location_nwp
-            )
-            nwp_features["base_prediction"] = base_prediction
-
-            fusion_input = nwp_features[
-                v2_fusion_features
-            ]
-
-            nwp_correction = float(
-                v2_fusion_model.predict(
-                    fusion_input
-                )[0]
-            )
-
-            applied_nwp_correction = (
-                v2_alpha * nwp_correction
-            )
-
-            predicted_rain = max(
-                0.0,
-                base_prediction
-                + applied_nwp_correction
-            )
-
-            heavy_warning = (
-                predicted_rain
-                >= HEAVY_RAIN_THRESHOLD
-            )
-            heavy_signal = (
-                1.0
-                if heavy_warning
-                else 0.0
-            )
-
-            risk_result = calculate_flood_risk(
-                predicted_rain_mm=predicted_rain,
-                heavy_probability=heavy_signal,
-                current_rain_mm=float(latest_live.get("rainfall_mm", 0.0)),
-                rain_3h_mm=float(latest_live.get("rain_3h", 0.0)),
-                rain_6h_mm=float(latest_live.get("rain_6h", 0.0)),
-                rain_24h_mm=float(latest_live.get("rain_24h", 0.0)),
-            )
-
-            processed_records.append({
-                "location": record.get("name", "Unknown"),
-                "latitude": float(record["latitude"]),
-                "longitude": float(record["longitude"]),
-                "datetime": latest_live.get("datetime", record.get("datetime")),
-                "rainfall_mm": float(latest_live.get("rainfall_mm", 0.0)),
-                "rain_3h": float(latest_live.get("rain_3h", 0.0)),
-                "rain_6h": float(latest_live.get("rain_6h", 0.0)),
-                "rain_24h": float(latest_live.get("rain_24h", 0.0)),
-                "predicted_rain_mm": predicted_rain,
-                "base_prediction_mm": base_prediction,
-                "nwp_correction_mm": nwp_correction,
-                "applied_nwp_correction_mm": applied_nwp_correction,
-                "nwp_next_1h_mm": float(
-                    location_nwp.iloc[0]["forecast_next_1h_mm"]
-                ),
-                "nwp_next_3h_mm": float(
-                    location_nwp.iloc[0]["forecast_next_3h_mm"]
-                ),
-                "nwp_next_6h_mm": float(
-                    location_nwp.iloc[0]["forecast_next_6h_mm"]
-                ),
-                "nwp_next_24h_mm": float(
-                    location_nwp.iloc[0]["forecast_next_24h_mm"]
-                ),
-                "heavy_signal": heavy_signal,
-                "heavy_warning": heavy_warning,
-                "risk_level": risk_result["risk_level"],
-                "risk_score": float(risk_result["score"]),
-                "risk_action": risk_result["action"],
-                "risk_factors": risk_result["factors"],
+            batch_items.append({
+                "record": record,
+                "location_name": location_name,
+                "latest_live": latest_live,
+                "X_live": X_live,
             })
+            base_inputs.append(X_live)
         except Exception as error:
             errors.append(f"{location_name}: {error}")
+
+    if base_inputs:
+        try:
+            base_batch = pd.concat(base_inputs, ignore_index=True)
+            base_values = predict_v2_batch("base", base_batch)
+
+            if len(base_values) != len(batch_items):
+                raise ValueError(
+                    "V2 base model returned an unexpected number of predictions."
+                )
+
+            for item, value in zip(batch_items, base_values):
+                item["base_prediction"] = max(0.0, float(value))
+        except Exception as error:
+            # Preserve the old fail-soft behavior if a batch prediction
+            # unexpectedly fails: retry location-by-location.
+            for item in batch_items:
+                location_name = item["location_name"]
+                try:
+                    value = v2_base_model.predict(item["X_live"])[0]
+                    item["base_prediction"] = max(0.0, float(value))
+                except Exception as location_error:
+                    errors.append(
+                        f"{location_name}: V2 base prediction failed "
+                        f"({location_error})"
+                    )
+                    item["base_prediction"] = None
+
+            batch_items = [
+                item for item in batch_items
+                if item.get("base_prediction") is not None
+            ]
+
+            if not batch_items:
+                st.warning(
+                    "The V2 base model batch prediction failed for all "
+                    "spatial locations."
+                )
+
+    # ------------------------------------------------------------
+    # 2) Build the NWP fusion rows.
+    #    All successful NWP rows are then predicted ONCE.
+    # ------------------------------------------------------------
+    fusion_inputs = []
+    fusion_items = []
+
+    for item in batch_items:
+        location_name = item["location_name"]
+        location_nwp = nwp_results.get(location_name)
+
+        if location_nwp is None or location_nwp.empty:
+            item["location_nwp"] = None
+            item["nwp_correction"] = 0.0
+            item["applied_nwp_correction"] = 0.0
+            item["predicted_rain"] = item["base_prediction"]
+            item["nwp_next_1h"] = np.nan
+            item["nwp_next_3h"] = np.nan
+            item["nwp_next_6h"] = np.nan
+            item["nwp_next_24h"] = np.nan
+            item["nwp_status"] = "V2 base fallback"
+            nwp_fallback_locations.append(location_name)
+            continue
+
+        try:
+            nwp_features = build_live_v2_nwp_features(location_nwp)
+            nwp_features["base_prediction"] = item["base_prediction"]
+
+            fusion_input = nwp_features[v2_fusion_features]
+
+            item["location_nwp"] = location_nwp
+            fusion_inputs.append(fusion_input)
+            fusion_items.append(item)
+        except Exception as error:
+            # Keep the location visible with the calibrated base prediction.
+            item["location_nwp"] = None
+            item["nwp_correction"] = 0.0
+            item["applied_nwp_correction"] = 0.0
+            item["predicted_rain"] = item["base_prediction"]
+            item["nwp_next_1h"] = np.nan
+            item["nwp_next_3h"] = np.nan
+            item["nwp_next_6h"] = np.nan
+            item["nwp_next_24h"] = np.nan
+            item["nwp_status"] = "V2 base fallback"
+            nwp_fallback_locations.append(location_name)
+            errors.append(f"{location_name}: NWP feature error: {error}")
+
+    if fusion_inputs:
+        try:
+            fusion_batch = pd.concat(fusion_inputs, ignore_index=True)
+            correction_values = predict_v2_batch("fusion", fusion_batch)
+
+            if len(correction_values) != len(fusion_items):
+                raise ValueError(
+                    "V2 fusion model returned an unexpected number of predictions."
+                )
+
+            for item, correction in zip(fusion_items, correction_values):
+                location_nwp = item["location_nwp"]
+                nwp_correction = float(correction)
+                applied_nwp_correction = v2_alpha * nwp_correction
+
+                item["nwp_correction"] = nwp_correction
+                item["applied_nwp_correction"] = applied_nwp_correction
+                item["predicted_rain"] = max(
+                    0.0,
+                    item["base_prediction"] + applied_nwp_correction,
+                )
+                item["nwp_next_1h"] = float(
+                    location_nwp.iloc[0]["forecast_next_1h_mm"]
+                )
+                item["nwp_next_3h"] = float(
+                    location_nwp.iloc[0]["forecast_next_3h_mm"]
+                )
+                item["nwp_next_6h"] = float(
+                    location_nwp.iloc[0]["forecast_next_6h_mm"]
+                )
+                item["nwp_next_24h"] = float(
+                    location_nwp.iloc[0]["forecast_next_24h_mm"]
+                )
+                item["nwp_status"] = "Live ECMWF"
+        except Exception as error:
+            # Extremely defensive fallback: retain each base prediction
+            # instead of making one fusion-model failure break the whole map.
+            for item in fusion_items:
+                location_name = item["location_name"]
+                item["location_nwp"] = None
+                item["nwp_correction"] = 0.0
+                item["applied_nwp_correction"] = 0.0
+                item["predicted_rain"] = item["base_prediction"]
+                item["nwp_next_1h"] = np.nan
+                item["nwp_next_3h"] = np.nan
+                item["nwp_next_6h"] = np.nan
+                item["nwp_next_24h"] = np.nan
+                item["nwp_status"] = "V2 base fallback"
+                nwp_fallback_locations.append(location_name)
+
+            errors.append(f"V2 fusion batch prediction failed: {error}")
+
+    # ------------------------------------------------------------
+    # 3) Calculate the risk layer and assemble the original output
+    #    schema. No UI fields or model outputs are removed.
+    # ------------------------------------------------------------
+    for item in batch_items:
+        location_name = item["location_name"]
+        latest_live = item["latest_live"]
+        predicted_rain = float(item["predicted_rain"])
+        nwp_correction = float(item["nwp_correction"])
+        applied_nwp_correction = float(item["applied_nwp_correction"])
+
+        heavy_warning = predicted_rain >= HEAVY_RAIN_THRESHOLD
+        heavy_signal = 1.0 if heavy_warning else 0.0
+
+        risk_result = calculate_flood_risk(
+            predicted_rain_mm=predicted_rain,
+            heavy_probability=heavy_signal,
+            current_rain_mm=float(latest_live.get("rainfall_mm", 0.0)),
+            rain_3h_mm=float(latest_live.get("rain_3h", 0.0)),
+            rain_6h_mm=float(latest_live.get("rain_6h", 0.0)),
+            rain_24h_mm=float(latest_live.get("rain_24h", 0.0)),
+        )
+
+        record = item["record"]
+
+        processed_records.append({
+            "location": location_name,
+            "latitude": float(record["latitude"]),
+            "longitude": float(record["longitude"]),
+            "datetime": latest_live.get(
+                "datetime",
+                record.get("datetime"),
+            ),
+            "rainfall_mm": float(latest_live.get("rainfall_mm", 0.0)),
+            "rain_3h": float(latest_live.get("rain_3h", 0.0)),
+            "rain_6h": float(latest_live.get("rain_6h", 0.0)),
+            "rain_24h": float(latest_live.get("rain_24h", 0.0)),
+            "predicted_rain_mm": predicted_rain,
+            "base_prediction_mm": item["base_prediction"],
+            "nwp_correction_mm": nwp_correction,
+            "applied_nwp_correction_mm": applied_nwp_correction,
+            "nwp_next_1h_mm": item["nwp_next_1h"],
+            "nwp_next_3h_mm": item["nwp_next_3h"],
+            "nwp_next_6h_mm": item["nwp_next_6h"],
+            "nwp_next_24h_mm": item["nwp_next_24h"],
+            "nwp_status": item["nwp_status"],
+            "heavy_signal": heavy_signal,
+            "heavy_warning": heavy_warning,
+            "risk_level": risk_result["risk_level"],
+            "risk_score": float(risk_result["score"]),
+            "risk_action": risk_result["action"],
+            "risk_factors": risk_result["factors"],
+        })
 
     spatial = pd.DataFrame(processed_records)
     if spatial.empty:
@@ -3628,6 +3962,13 @@ elif page == "🗺️ Mumbai Risk Map":
             for message in errors:
                 st.write(f"• {message}")
 
+    if nwp_fallback_locations:
+        st.warning(
+            f"ECMWF temporarily unavailable for "
+            f"{len(nwp_fallback_locations)} location(s); "
+            "V2 base fallback used so the Risk Map remains available."
+        )
+
     st.subheader("Mumbai-Wide Risk Summary")
     low = int((spatial["risk_level"] == "LOW").sum())
     moderate = int((spatial["risk_level"] == "MODERATE").sum())
@@ -3654,7 +3995,7 @@ elif page == "🗺️ Mumbai Risk Map":
     map_data = spatial[[
         "location", "latitude", "longitude", "risk_level", "risk_score",
         "predicted_rain_mm", "base_prediction_mm",
-        "applied_nwp_correction_mm", "nwp_next_1h_mm",
+        "applied_nwp_correction_mm", "nwp_next_1h_mm", "nwp_status",
         "heavy_signal", "heavy_warning",
         "rainfall_mm", "rain_3h", "rain_6h", "rain_24h",
         "elevation_m", "elevation_source", "color",
@@ -3690,6 +4031,7 @@ elif page == "🗺️ Mumbai Risk Map":
             "Applied NWP correction: {applied_nwp_correction_mm} mm<br/>"
             "Final V2 next-hour rainfall: {predicted_rain_mm} mm<br/>"
             "Raw ECMWF next-hour input: {nwp_next_1h_mm} mm<br/>"
+            "NWP status: {nwp_status}<br/>"
             "Heavy-rain signal: {heavy_signal}<br/>"
             "Heavy warning: {heavy_warning}<br/>"
             "Current rainfall: {rainfall_mm} mm<br/>"
@@ -5454,12 +5796,26 @@ elif page == "🧠 V1 Historical Baseline":
     ]
 
     if missing_artifacts:
-        st.error(
-            "One or more final multisource model artifacts are missing."
-        )
-        for path in missing_artifacts:
-            st.write(path)
-        st.stop()
+        # The two generated evaluation artifacts below are allowed to be rebuilt
+        # from the tracked final model + holdout data at runtime. Other missing
+        # artifacts are still fatal because the page cannot function without them.
+        generated_at_runtime = {
+            str(FINAL_MODEL_TRAINING_METRICS_PATH),
+            str(FINAL_MODEL_PREDICTIONS_PATH),
+        }
+        fatal_missing = [
+            path
+            for path in missing_artifacts
+            if path not in generated_at_runtime
+        ]
+
+        if fatal_missing:
+            st.error(
+                "One or more final multisource model artifacts are missing."
+            )
+            for path in fatal_missing:
+                st.write(path)
+            st.stop()
 
     try:
         (
@@ -5468,17 +5824,43 @@ elif page == "🧠 V1 Historical Baseline":
             final_feature_info,
         ) = load_final_multisource_model()
 
-        with open(
-            FINAL_MODEL_TRAINING_METRICS_PATH,
-            "r",
-            encoding="utf-8",
-        ) as file:
-            final_metrics = json.load(file)
+        if FINAL_MODEL_TRAINING_METRICS_PATH.exists():
+            with open(
+                FINAL_MODEL_TRAINING_METRICS_PATH,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                final_metrics = json.load(file)
+        else:
+            # The detailed comparison JSON is optional for deployment.
+            # Reuse the frozen holdout metrics embedded in final_metadata so
+            # the historical page remains usable without fabricating values.
+            fallback_overall = (
+                final_metadata
+                .get("metrics_2025_holdout", {})
+                .get("random_forest", {})
+                .get("overall", {})
+            )
+            fallback_heavy = (
+                final_metadata
+                .get("metrics_2025_holdout", {})
+                .get("random_forest", {})
+                .get("heavy", {})
+            )
+            final_metrics = {
+                "models": {
+                    "multisource_random_forest": {
+                        "overall": fallback_overall,
+                        "heavy": fallback_heavy,
+                    }
+                }
+            }
+            st.info(
+                "The archived comparative metrics JSON is not bundled with this deployment; "
+                "the frozen holdout metrics stored in the model metadata are being used instead."
+            )
 
-        final_predictions = pd.read_csv(
-            FINAL_MODEL_PREDICTIONS_PATH,
-            parse_dates=["datetime"],
-        )
+        final_predictions = load_final_test_predictions()
 
         final_importance = pd.read_csv(
             FINAL_MODEL_IMPORTANCE_PATH
